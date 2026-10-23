@@ -1,0 +1,804 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p .
+          cat > build.gradle <<'SPAWNGUI_EOF'
+          plugins {
+          	id 'net.fabricmc.fabric-loom'
+          	id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+          	archivesName = project.archives_base_name
+          }
+
+          repositories {
+          	// Loom сам добавляет нужные Maven-репозитории.
+          	// Mod Menu — только для компиляции (в jar не попадает, в рантайме он опционален).
+          	maven {
+          		name = 'TerraformersMC'
+          		url = 'https://maven.terraformersmc.com/'
+          		content {
+          			includeGroup 'com.terraformersmc'
+          		}
+          		metadataSources {
+          			mavenPom()
+          			artifact()
+          		}
+          	}
+          }
+
+          dependencies {
+          	// 26.x — игра без обфускации, поэтому строки mappings нет.
+          	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+          	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+          	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+          	compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
+          }
+
+          processResources {
+          	inputs.property "version", project.version
+
+          	filesMatching("fabric.mod.json") {
+          		expand "version": project.version
+          	}
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+          	it.options.release = 25
+          }
+
+          java {
+          	withSourcesJar()
+          	sourceCompatibility = JavaVersion.VERSION_25
+          	targetCompatibility = JavaVersion.VERSION_25
+          }
+          SPAWNGUI_EOF
+          mkdir -p .
+          cat > gradle.properties <<'SPAWNGUI_EOF'
+          org.gradle.jvmargs=-Xmx2G
+          org.gradle.parallel=true
+
+          # Fabric: https://fabricmc.net/develop
+          minecraft_version=26.2
+          loader_version=0.19.5
+          loom_version=1.18.4
+          fabric_api_version=0.161.0+26.2
+
+          # Mod Menu (опциональная зависимость, нужна только для сборки)
+          modmenu_version=20.0.3
+
+          # Mod
+          mod_version=1.1.0
+          maven_group=com.example.spawngui
+          archives_base_name=spawngui
+          SPAWNGUI_EOF
+          mkdir -p .
+          cat > settings.gradle <<'SPAWNGUI_EOF'
+          pluginManagement {
+          	repositories {
+          		maven {
+          			name = 'Fabric'
+          			url = 'https://maven.fabricmc.net/'
+          		}
+          		mavenCentral()
+          		gradlePluginPortal()
+          	}
+          	plugins {
+          		id 'net.fabricmc.fabric-loom' version providers.gradleProperty('loom_version').get()
+          	}
+          }
+
+          rootProject.name = 'spawngui'
+          SPAWNGUI_EOF
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'SPAWNGUI_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "spawngui",
+            "version": "${version}",
+            "name": "Spawn GUI",
+            "description": "Меню спавна мобов: выбери яйцо, посмотри модельку, настрой параметры и количество.",
+            "authors": ["You"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.example.spawngui.client.SpawnGuiClient"],
+              "modmenu": ["com.example.spawngui.client.SpawnGuiModMenu"]
+            },
+            "depends": {
+              "fabricloader": ">=0.19.2",
+              "minecraft": "~26.2",
+              "java": ">=25",
+              "fabric-api": "*"
+            },
+            "suggests": {
+              "modmenu": "*"
+            }
+          }
+          SPAWNGUI_EOF
+          mkdir -p src/main/resources/assets/spawngui/lang
+          cat > src/main/resources/assets/spawngui/lang/en_us.json <<'SPAWNGUI_EOF'
+          {
+            "key.spawngui.open": "Open spawn menu",
+            "key.category.spawngui.main": "Spawn GUI"
+          }
+          SPAWNGUI_EOF
+          mkdir -p src/main/resources/assets/spawngui/lang
+          cat > src/main/resources/assets/spawngui/lang/ru_ru.json <<'SPAWNGUI_EOF'
+          {
+            "key.spawngui.open": "Открыть меню спавна",
+            "key.category.spawngui.main": "Spawn GUI"
+          }
+          SPAWNGUI_EOF
+          mkdir -p src/main/java/com/example/spawngui/client
+          cat > src/main/java/com/example/spawngui/client/SpawnGuiModMenu.java <<'SPAWNGUI_EOF'
+          package com.example.spawngui.client;
+
+          import com.terraformersmc.modmenu.api.ConfigScreenFactory;
+          import com.terraformersmc.modmenu.api.ModMenuApi;
+          import net.minecraft.client.Minecraft;
+          import net.minecraft.client.gui.screens.options.controls.KeyBindsScreen;
+
+          /**
+           * Кнопка настроек мода в Mod Menu: открывает стандартный экран назначения клавиш,
+           * где в категории «Spawn GUI» можно переназначить клавишу открытия меню.
+           */
+          public class SpawnGuiModMenu implements ModMenuApi {
+          	@Override
+          	public ConfigScreenFactory<?> getModConfigScreenFactory() {
+          		return parent -> new KeyBindsScreen(parent, Minecraft.getInstance().options);
+          	}
+          }
+          SPAWNGUI_EOF
+          mkdir -p src/main/java/com/example/spawngui/client
+          cat > src/main/java/com/example/spawngui/client/SpawnGuiClient.java <<'SPAWNGUI_EOF'
+          package com.example.spawngui.client;
+
+          import com.mojang.blaze3d.platform.InputConstants;
+          import java.util.ArrayDeque;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+          import net.minecraft.client.KeyMapping;
+          import net.minecraft.resources.Identifier;
+          import org.lwjgl.glfw.GLFW;
+
+          public class SpawnGuiClient implements ClientModInitializer {
+          	public static final String MOD_ID = "spawngui";
+
+          	/** Команды на отправку (запасной путь для мультиплеера). Шлём по несколько за тик. */
+          	private static final ArrayDeque<String> PENDING = new ArrayDeque<>();
+          	private static final int COMMANDS_PER_TICK = 5;
+
+          	private static KeyMapping openKey;
+
+          	public static void queue(String command) {
+          		PENDING.add(command);
+          	}
+
+          	@Override
+          	public void onInitializeClient() {
+          		KeyMapping.Category category = KeyMapping.Category.register(
+          				Identifier.fromNamespaceAndPath(MOD_ID, "main"));
+
+          		openKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+          				"key.spawngui.open",
+          				InputConstants.Type.KEYSYM,
+          				GLFW.GLFW_KEY_K,
+          				category));
+
+          		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+          			if (client.player == null) {
+          				PENDING.clear();
+          				return;
+          			}
+
+          			while (openKey.consumeClick()) {
+          				if (client.gui.screen() == null) {
+          					client.gui.setScreen(new SpawnScreen());
+          				}
+          			}
+
+          			for (int i = 0; i < COMMANDS_PER_TICK && !PENDING.isEmpty(); i++) {
+          				client.player.connection.sendCommand(PENDING.poll());
+          			}
+          		});
+          	}
+          }
+          SPAWNGUI_EOF
+          mkdir -p src/main/java/com/example/spawngui/client
+          cat > src/main/java/com/example/spawngui/client/SpawnScreen.java <<'SPAWNGUI_EOF'
+          package com.example.spawngui.client;
+
+          import java.util.ArrayList;
+          import java.util.Comparator;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Map;
+          import java.util.Random;
+          import java.util.UUID;
+          import java.util.function.BooleanSupplier;
+          import java.util.function.Consumer;
+          import java.util.function.Supplier;
+          import net.minecraft.ChatFormatting;
+          import net.minecraft.client.gui.GuiGraphicsExtractor;
+          import net.minecraft.client.gui.components.Button;
+          import net.minecraft.client.gui.components.EditBox;
+          import net.minecraft.client.gui.screens.Screen;
+          import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+          import net.minecraft.core.registries.BuiltInRegistries;
+          import net.minecraft.network.chat.Component;
+          import net.minecraft.server.MinecraftServer;
+          import net.minecraft.server.level.ServerLevel;
+          import net.minecraft.server.level.ServerPlayer;
+          import net.minecraft.world.entity.Entity;
+          import net.minecraft.world.entity.EntitySpawnReason;
+          import net.minecraft.world.entity.EntityType;
+          import net.minecraft.world.entity.LivingEntity;
+          import net.minecraft.world.entity.Mob;
+          import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+          import net.minecraft.world.entity.ai.attributes.Attributes;
+          import net.minecraft.world.item.Item;
+          import net.minecraft.world.item.ItemStack;
+
+          /**
+           * Меню спавна: слева — модель выбранного моба, в середине — список яиц спавна с поиском,
+           * справа — параметры и количество.
+           *
+           * В одиночной игре (и на LAN-хосте) мобы создаются напрямую на встроенном сервере — права оператора
+           * не нужны. На чужом сервере используется /summon (там права оператора нужны всегда).
+           */
+          public class SpawnScreen extends Screen {
+
+          	private record MobEntry(String id, EntityType<?> type, ItemStack egg, String label, String search) {}
+
+          	/** Снимок настроек на момент нажатия кнопки или обновления модельки. */
+          	private record Params(String name, int hp, double scale, boolean baby, boolean noAi,
+          			boolean silent, boolean invulnerable, boolean glowing, boolean persistent) {}
+
+          	private static final int ROWS = 9;
+          	private static final int[] COUNTS = {1, 2, 3, 5, 10, 25, 50, 100};
+          	private static final double[] SCALES = {0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0};
+          	private static final int[] HEALTHS = {0, 1, 10, 50, 100, 500, 1024};
+
+          	private static List<MobEntry> entries;
+
+          	// Настройки запоминаются между открытиями меню.
+          	private static String selectedId;
+          	private static String filter = "";
+          	private static String customName = "";
+          	private static int page;
+          	private static int countIdx;
+          	private static int scaleIdx = 2;
+          	private static int hpIdx;
+          	private static boolean baby;
+          	private static boolean noAi;
+          	private static boolean silent;
+          	private static boolean invulnerable;
+          	private static boolean glowing;
+          	private static boolean persistent;
+
+          	private final List<Button> listButtons = new ArrayList<>();
+          	private final List<MobEntry> listShown = new ArrayList<>();
+          	private Button pageLabel;
+          	private Button modelLabel;
+          	private LivingEntity preview;
+          	/** Размер моба без модификаторов — от него считается масштаб показа. */
+          	private float previewBase = 1.0f;
+
+          	private int modelX;
+          	private int modelY;
+          	private int modelW;
+          	private int modelH;
+          	private int listX;
+          	private int listW;
+          	private int listTop;
+
+          	public SpawnScreen() {
+          		super(Component.literal("Спавн мобов"));
+          	}
+
+          	// ------------------------------------------------------------ данные
+
+          	/** Все яйца спавна, у которых есть одноимённый моб. Собирается один раз. */
+          	private static List<MobEntry> entries() {
+          		if (entries != null) {
+          			return entries;
+          		}
+
+          		Map<String, EntityType<?>> types = new HashMap<>();
+          		for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
+          			types.put(BuiltInRegistries.ENTITY_TYPE.getKey(type).toString(), type);
+          		}
+
+          		List<MobEntry> list = new ArrayList<>();
+          		for (Item item : BuiltInRegistries.ITEM) {
+          			var key = BuiltInRegistries.ITEM.getKey(item);
+          			String path = key.getPath();
+          			if (!path.endsWith("_spawn_egg")) {
+          				continue;
+          			}
+          			String id = key.getNamespace() + ":" + path.substring(0, path.length() - "_spawn_egg".length());
+          			EntityType<?> type = types.get(id);
+          			if (type == null) {
+          				continue;
+          			}
+          			String label = type.getDescription().getString();
+          			list.add(new MobEntry(id, type, new ItemStack(item), label, (label + " " + id).toLowerCase(Locale.ROOT)));
+          		}
+
+          		list.sort(Comparator.comparing(MobEntry::label, String.CASE_INSENSITIVE_ORDER));
+          		entries = list;
+          		return list;
+          	}
+
+          	private static MobEntry find(String id) {
+          		for (MobEntry e : entries()) {
+          			if (e.id().equals(id)) {
+          				return e;
+          			}
+          		}
+          		return null;
+          	}
+
+          	private MobEntry current() {
+          		return find(selectedId);
+          	}
+
+          	private static List<MobEntry> filtered() {
+          		String q = filter.trim().toLowerCase(Locale.ROOT);
+          		if (q.isEmpty()) {
+          			return entries();
+          		}
+          		List<MobEntry> out = new ArrayList<>();
+          		for (MobEntry e : entries()) {
+          			if (e.search().contains(q)) {
+          				out.add(e);
+          			}
+          		}
+          		return out;
+          	}
+
+          	private static Params params() {
+          		return new Params(customName.trim(), HEALTHS[hpIdx], SCALES[scaleIdx], baby, noAi,
+          				silent, invulnerable, glowing, persistent);
+          	}
+
+          	// ------------------------------------------------------------ интерфейс
+
+          	@Override
+          	protected void init() {
+          		List<MobEntry> all = entries();
+          		if (find(selectedId) == null) {
+          			MobEntry zombie = find("minecraft:zombie");
+          			selectedId = zombie != null ? zombie.id() : (all.isEmpty() ? null : all.get(0).id());
+          		}
+
+          		listButtons.clear();
+          		listShown.clear();
+
+          		// Раскладка: [модель] [список яиц] [параметры]
+          		int total = Math.min(this.width - 16, 440);
+          		int left = (this.width - total) / 2;
+          		int gap = 6;
+          		modelW = total * 26 / 100;
+          		listW = total * 32 / 100;
+          		int paramW = total - modelW - listW - gap * 2;
+          		modelX = left;
+          		listX = modelX + modelW + gap;
+          		int paramX = listX + listW + gap;
+
+          		int titleY = Math.max(2, (this.height - 222) / 2);
+          		int top = titleY + 24;
+          		listTop = top;
+          		modelY = top;
+          		modelH = 172;
+
+          		// Заголовок — неактивная кнопка (лейбл без своей отрисовки текста).
+          		Button heading = Button.builder(this.title, b -> {}).bounds(left, titleY, total, 20).build();
+          		heading.active = false;
+          		this.addRenderableWidget(heading);
+
+          		// Подпись под моделькой.
+          		modelLabel = Button.builder(Component.empty(), b -> {}).bounds(modelX, top + 176, modelW, 20).build();
+          		modelLabel.active = false;
+          		this.addRenderableWidget(modelLabel);
+
+          		// Список: поиск, строки, переключатель страниц.
+          		EditBox searchBox = new EditBox(this.font, listX, top, listW, 18, Component.literal("Поиск"));
+          		searchBox.setHint(Component.literal("Поиск моба..."));
+          		searchBox.setMaxLength(32);
+          		searchBox.setValue(filter);
+          		searchBox.setResponder(s -> {
+          			filter = s;
+          			page = 0;
+          			rebuildList();
+          		});
+          		this.addRenderableWidget(searchBox);
+
+          		int pagerY = top + 176;
+          		this.addRenderableWidget(Button.builder(Component.literal("<"), b -> changePage(-1))
+          				.bounds(listX, pagerY, 24, 20).build());
+          		pageLabel = Button.builder(Component.empty(), b -> {})
+          				.bounds(listX + 26, pagerY, listW - 52, 20).build();
+          		pageLabel.active = false;
+          		this.addRenderableWidget(pageLabel);
+          		this.addRenderableWidget(Button.builder(Component.literal(">"), b -> changePage(1))
+          				.bounds(listX + listW - 24, pagerY, 24, 20).build());
+
+          		// Параметры. Любое изменение сразу отражается на моделке.
+          		int hw = (paramW - 4) / 2;
+          		int x2 = paramX + hw + 4;
+
+          		EditBox nameBox = new EditBox(this.font, paramX, top, paramW, 20, Component.literal("Имя"));
+          		nameBox.setHint(Component.literal("Имя моба (необязательно)"));
+          		nameBox.setMaxLength(40);
+          		nameBox.setValue(customName);
+          		nameBox.setResponder(s -> {
+          			customName = s;
+          			updateModelLabel();
+          		});
+          		this.addRenderableWidget(nameBox);
+
+          		this.addRenderableWidget(cycle(paramX, top + 24, hw,
+          				() -> "Кол-во: " + COUNTS[countIdx],
+          				() -> countIdx = (countIdx + 1) % COUNTS.length));
+          		this.addRenderableWidget(cycle(x2, top + 24, hw,
+          				() -> "Размер: x" + fmt(SCALES[scaleIdx]),
+          				() -> scaleIdx = (scaleIdx + 1) % SCALES.length));
+          		this.addRenderableWidget(cycle(paramX, top + 48, hw,
+          				() -> hpIdx == 0 ? "HP: авто" : "HP: " + HEALTHS[hpIdx],
+          				() -> hpIdx = (hpIdx + 1) % HEALTHS.length));
+          		this.addRenderableWidget(toggle(x2, top + 48, hw, "Малыш", () -> baby, v -> baby = v));
+          		this.addRenderableWidget(toggle(paramX, top + 72, hw, "Без ИИ", () -> noAi, v -> noAi = v));
+          		this.addRenderableWidget(toggle(x2, top + 72, hw, "Тихий", () -> silent, v -> silent = v));
+          		this.addRenderableWidget(toggle(paramX, top + 96, hw, "Неуязвим", () -> invulnerable, v -> invulnerable = v));
+          		this.addRenderableWidget(toggle(x2, top + 96, hw, "Свечение", () -> glowing, v -> glowing = v));
+          		this.addRenderableWidget(toggle(paramX, top + 120, paramW, "Не исчезает", () -> persistent, v -> persistent = v));
+
+          		boolean local = this.minecraft != null && this.minecraft.getSingleplayerServer() != null;
+          		Button hint = Button.builder(
+          				Component.literal(local ? "Права оператора не нужны" : "На сервере нужен оператор"), b -> {})
+          				.bounds(paramX, top + 148, paramW, 18).build();
+          		hint.active = false;
+          		this.addRenderableWidget(hint);
+
+          		this.addRenderableWidget(Button.builder(Component.literal("Заспавнить"), b -> {
+          			spawn();
+          			this.onClose();
+          		}).bounds(paramX, top + 176, paramW, 20).build());
+
+          		rebuildList();
+          		updatePreview();
+          	}
+
+          	private Button cycle(int x, int y, int w, Supplier<String> label, Runnable step) {
+          		return Button.builder(Component.literal(label.get()), b -> {
+          			step.run();
+          			b.setMessage(Component.literal(label.get()));
+          			updatePreview();
+          		}).bounds(x, y, w, 20).build();
+          	}
+
+          	private Button toggle(int x, int y, int w, String name, BooleanSupplier get, Consumer<Boolean> set) {
+          		return Button.builder(toggleText(name, get.getAsBoolean()), b -> {
+          			set.accept(!get.getAsBoolean());
+          			b.setMessage(toggleText(name, get.getAsBoolean()));
+          			updatePreview();
+          		}).bounds(x, y, w, 20).build();
+          	}
+
+          	private static Component toggleText(String name, boolean on) {
+          		return Component.literal(name + ": " + (on ? "да" : "нет"));
+          	}
+
+          	private static String fmt(double v) {
+          		return v == Math.floor(v) ? String.valueOf((int) v) : String.valueOf(v);
+          	}
+
+          	private void rebuildList() {
+          		for (Button b : listButtons) {
+          			this.removeWidget(b);
+          		}
+          		listButtons.clear();
+          		listShown.clear();
+
+          		List<MobEntry> shown = filtered();
+          		int pages = Math.max(1, (shown.size() + ROWS - 1) / ROWS);
+          		page = Math.max(0, Math.min(page, pages - 1));
+
+          		for (int i = 0; i < ROWS; i++) {
+          			int idx = page * ROWS + i;
+          			if (idx >= shown.size()) {
+          				break;
+          			}
+          			MobEntry e = shown.get(idx);
+          			Component label = e.id().equals(selectedId)
+          					? Component.literal(e.label()).withStyle(ChatFormatting.YELLOW)
+          					: Component.literal(e.label());
+          			Button b = Button.builder(label, btn -> select(e))
+          					.bounds(listX, listTop + 22 + i * 17, listW, 16).build();
+          			this.addRenderableWidget(b);
+          			listButtons.add(b);
+          			listShown.add(e);
+          		}
+
+          		if (pageLabel != null) {
+          			pageLabel.setMessage(Component.literal((page + 1) + " / " + pages));
+          		}
+          	}
+
+          	private void changePage(int delta) {
+          		page += delta;
+          		rebuildList();
+          	}
+
+          	private void select(MobEntry e) {
+          		selectedId = e.id();
+          		updatePreview();
+          		rebuildList();
+          	}
+
+          	private void updateModelLabel() {
+          		MobEntry e = current();
+          		if (e == null) {
+          			modelLabel.setMessage(Component.literal("-"));
+          			return;
+          		}
+          		String text = e.label();
+          		if (SCALES[scaleIdx] != 1.0) {
+          			text += " x" + fmt(SCALES[scaleIdx]);
+          		}
+          		modelLabel.setMessage(Component.literal(text));
+          	}
+
+          	/** Пересоздаёт моделька-превью с текущими настройками и обновляет подпись. */
+          	private void updatePreview() {
+          		makePreview();
+          		updateModelLabel();
+          	}
+
+          	/** Создаёт клиентскую копию моба только для показа модельки (в мир она не добавляется). */
+          	private void makePreview() {
+          		preview = null;
+          		MobEntry e = current();
+          		if (e == null || this.minecraft == null || this.minecraft.level == null) {
+          			return;
+          		}
+          		try {
+          			Entity entity = e.type().create(this.minecraft.level, EntitySpawnReason.LOAD);
+          			if (entity instanceof LivingEntity living) {
+          				previewBase = Math.max(living.getBbHeight(), living.getBbWidth() * 0.9f);
+          				applyParams(living, params(), true);
+          				preview = living;
+          			}
+          		} catch (Throwable ex) {
+          			preview = null;
+          		}
+          	}
+
+          	/** Применяет настройки к мобу — и для превью, и для настоящего спавна. */
+          	private static void applyParams(Entity entity, Params p, boolean forPreview) {
+          		if (!forPreview && !p.name().isEmpty()) {
+          			entity.setCustomName(Component.literal(p.name()));
+          			entity.setCustomNameVisible(true);
+          		}
+          		entity.setSilent(p.silent());
+          		entity.setInvulnerable(p.invulnerable());
+          		entity.setGlowingTag(p.glowing());
+
+          		if (entity instanceof Mob mob) {
+          			mob.setNoAi(p.noAi());
+          			if (p.baby()) {
+          				mob.setBaby(true);
+          			}
+          			if (p.persistent()) {
+          				mob.setPersistenceRequired();
+          			}
+          		}
+
+          		if (entity instanceof LivingEntity living) {
+          			AttributeInstance scale = living.getAttribute(Attributes.SCALE);
+          			if (scale != null) {
+          				scale.setBaseValue(p.scale());
+          			}
+          			if (p.hp() > 0) {
+          				AttributeInstance maxHealth = living.getAttribute(Attributes.MAX_HEALTH);
+          				if (maxHealth != null) {
+          					maxHealth.setBaseValue(p.hp());
+          				}
+          				living.setHealth((float) p.hp());
+          			}
+          		}
+
+          		entity.refreshDimensions();
+          	}
+
+          	@Override
+          	public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
+          		super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+
+          		// Тёмная панель под моделькой (с рамкой, если включено свечение).
+          		graphics.fill(modelX, modelY, modelX + modelW, modelY + modelH, 0xCC101010);
+          		if (glowing) {
+          			int c = 0xFFFFFF99;
+          			graphics.fill(modelX, modelY, modelX + modelW, modelY + 1, c);
+          			graphics.fill(modelX, modelY + modelH - 1, modelX + modelW, modelY + modelH, c);
+          			graphics.fill(modelX, modelY, modelX + 1, modelY + modelH, c);
+          			graphics.fill(modelX + modelW - 1, modelY, modelX + modelW, modelY + modelH, c);
+          		}
+
+          		graphics.nextStratum();
+
+          		// Иконка яйца слева в каждой строке списка.
+          		for (int i = 0; i < listButtons.size(); i++) {
+          			Button b = listButtons.get(i);
+          			graphics.item(listShown.get(i).egg(), b.getX() + 2, b.getY());
+          		}
+
+          		// Моделька следит за курсором, как в инвентаре.
+          		// Видимый размер растёт вместе с параметром «Размер» (логарифмически, чтобы x10 ещё влезал в панель).
+          		// Сам моб уже масштабируется атрибутом, поэтому делим на масштаб.
+          		if (preview != null) {
+          			double s = SCALES[scaleIdx];
+          			double t = Math.log(s / SCALES[0]) / Math.log(SCALES[SCALES.length - 1] / SCALES[0]);
+          			double fill = 0.30 + 0.45 * t;
+          			int scale = (int) Math.max(2.0, Math.min(200.0, modelH * fill / (previewBase * s)));
+          			InventoryScreen.extractEntityInInventoryFollowsMouse(graphics,
+          					modelX, modelY, modelX + modelW, modelY + modelH,
+          					scale, 0.0625f, (float) mouseX, (float) mouseY, preview);
+          		}
+          	}
+
+          	// ------------------------------------------------------------ спавн
+
+          	/** Собирает NBT для /summon из выбранных параметров (путь для чужих серверов). */
+          	private static String buildNbt(Params p) {
+          		List<String> tags = new ArrayList<>();
+          		if (p.noAi()) {
+          			tags.add("NoAI:1b");
+          		}
+          		if (p.silent()) {
+          			tags.add("Silent:1b");
+          		}
+          		if (p.invulnerable()) {
+          			tags.add("Invulnerable:1b");
+          		}
+          		if (p.glowing()) {
+          			tags.add("Glowing:1b");
+          		}
+          		if (p.persistent()) {
+          			tags.add("PersistenceRequired:1b");
+          		}
+          		if (p.baby()) {
+          			tags.add("IsBaby:1b");
+          			tags.add("Age:-24000");
+          		}
+
+          		String name = p.name();
+          		if (!name.isEmpty()) {
+          			tags.add("CustomName:\"" + name.replace("\\", "\\\\").replace("\"", "\\\"") + "\"");
+          			tags.add("CustomNameVisible:1b");
+          		}
+
+          		List<String> attrs = new ArrayList<>();
+          		if (p.hp() > 0) {
+          			attrs.add("{id:\"minecraft:max_health\",base:" + p.hp() + "d}");
+          			tags.add("Health:" + p.hp() + "f");
+          		}
+          		if (p.scale() != 1.0) {
+          			attrs.add("{id:\"minecraft:scale\",base:" + p.scale() + "d}");
+          		}
+          		if (!attrs.isEmpty()) {
+          			tags.add("attributes:[" + String.join(",", attrs) + "]");
+          		}
+
+          		return tags.isEmpty() ? "" : "{" + String.join(",", tags) + "}";
+          	}
+
+          	/** Спавнит мобов перед игроком: напрямую на встроенном сервере или через /summon на чужом. */
+          	private void spawn() {
+          		MobEntry e = current();
+          		if (e == null || this.minecraft == null || this.minecraft.player == null) {
+          			return;
+          		}
+
+          		Params p = params();
+          		int count = COUNTS[countIdx];
+          		Random random = new Random();
+          		double spread = count == 1 ? 0.0 : Math.min(8.0, 1.5 + Math.sqrt(count));
+
+          		// Смещения «вперёд / вбок» от игрока для каждого моба.
+          		double[] sides = new double[count];
+          		double[] forwards = new double[count];
+          		for (int i = 0; i < count; i++) {
+          			sides[i] = (random.nextDouble() - 0.5) * 2.0 * spread;
+          			forwards[i] = 3.0 + random.nextDouble() * spread;
+          		}
+
+          		MinecraftServer server = this.minecraft.getSingleplayerServer();
+          		if (server != null) {
+          			spawnLocal(server, this.minecraft.player.getUUID(), e.type(), p, sides, forwards);
+          			return;
+          		}
+
+          		// Чужой сервер: только через команду, права оператора обязательны.
+          		String nbt = buildNbt(p);
+          		for (int i = 0; i < count; i++) {
+          			String pos = String.format(Locale.ROOT, "^%.2f ^ ^%.2f", sides[i], forwards[i]);
+          			// rotated ~ 0: считаем «вперёд» по горизонтали, даже если игрок смотрит вниз или вверх.
+          			SpawnGuiClient.queue("execute rotated ~ 0 run summon " + e.id() + " " + pos
+          					+ (nbt.isEmpty() ? "" : " " + nbt));
+          		}
+          	}
+
+          	/** Создаёт мобов прямо в мире встроенного сервера — без команд и без прав оператора. */
+          	private static void spawnLocal(MinecraftServer server, UUID playerId, EntityType<?> type, Params p,
+          			double[] sides, double[] forwards) {
+          		server.execute(() -> {
+          			ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+          			if (player == null) {
+          				return;
+          			}
+          			ServerLevel level = (ServerLevel) player.level();
+          			double yaw = Math.toRadians(player.getYRot());
+          			double fx = -Math.sin(yaw);
+          			double fz = Math.cos(yaw);
+
+          			for (int i = 0; i < sides.length; i++) {
+          				Entity entity = type.create(level, EntitySpawnReason.COMMAND);
+          				if (entity == null) {
+          					continue;
+          				}
+          				double x = player.getX() + fx * forwards[i] + fz * sides[i];
+          				double z = player.getZ() + fz * forwards[i] - fx * sides[i];
+          				entity.setPos(x, player.getY(), z);
+          				entity.setYRot(player.getYRot() + 180.0f);
+
+          				if (entity instanceof Mob mob) {
+          					mob.finalizeSpawn(level, level.getCurrentDifficultyAt(entity.blockPosition()),
+          							EntitySpawnReason.COMMAND, null);
+          				}
+          				applyParams(entity, p, false);
+          				level.addFreshEntity(entity);
+          			}
+          		});
+          	}
+          }
+          SPAWNGUI_EOF
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.7.0
+
+      - name: Build mod
+        run: gradle build
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: spawngui-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar

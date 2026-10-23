@@ -270,6 +270,9 @@ jobs:
           	private record Params(String name, int hp, double scale, boolean baby, boolean noAi,
           			boolean silent, boolean invulnerable, boolean glowing, boolean persistent) {}
 
+          	/** ID для превью-моба: в мир он не попадает, поэтому коллизий нет. */
+          	private static final int PREVIEW_ENTITY_ID = 0x7FFFFF00;
+
           	private static final int ROWS = 9;
           	private static final int[] COUNTS = {1, 2, 3, 5, 10, 25, 50, 100};
           	private static final double[] SCALES = {0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0};
@@ -582,6 +585,8 @@ jobs:
           		try {
           			Entity entity = e.type().create(this.minecraft.level, EntitySpawnReason.LOAD);
           			if (entity instanceof LivingEntity living) {
+          				// Моб вне мира не имеет ID, а рендерер его требует — выдаём фиктивный.
+          				living.setId(PREVIEW_ENTITY_ID);
           				previewBase = Math.max(living.getBbHeight(), living.getBbWidth() * 0.9f);
           				applyParams(living, params(), true);
           				preview = living;

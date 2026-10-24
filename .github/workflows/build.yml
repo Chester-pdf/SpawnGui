@@ -133,6 +133,7 @@ jobs:
           cat > src/main/resources/assets/spawngui/lang/en_us.json <<'SPAWNGUI_EOF'
           {
             "key.spawngui.open": "Open spawn menu",
+            "key.spawngui.remove": "Remove spawned mob you are looking at",
             "key.category.spawngui.main": "Spawn GUI"
           }
           SPAWNGUI_EOF
@@ -140,6 +141,7 @@ jobs:
           cat > src/main/resources/assets/spawngui/lang/ru_ru.json <<'SPAWNGUI_EOF'
           {
             "key.spawngui.open": "Открыть меню спавна",
+            "key.spawngui.remove": "Убрать заспавненного моба, на которого смотришь",
             "key.category.spawngui.main": "Spawn GUI"
           }
           SPAWNGUI_EOF
@@ -184,6 +186,7 @@ jobs:
           	private static final int COMMANDS_PER_TICK = 5;
 
           	private static KeyMapping openKey;
+          	private static KeyMapping removeKey;
 
           	public static void queue(String command) {
           		PENDING.add(command);
@@ -200,6 +203,12 @@ jobs:
           				GLFW.GLFW_KEY_K,
           				category));
 
+          		removeKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+          				"key.spawngui.remove",
+          				InputConstants.Type.KEYSYM,
+          				GLFW.GLFW_KEY_X,
+          				category));
+
           		ClientTickEvents.END_CLIENT_TICK.register(client -> {
           			if (client.player == null) {
           				PENDING.clear();
@@ -209,6 +218,12 @@ jobs:
           			while (openKey.consumeClick()) {
           				if (client.gui.screen() == null) {
           					client.gui.setScreen(new SpawnScreen());
+          				}
+          			}
+
+          			while (removeKey.consumeClick()) {
+          				if (client.gui.screen() == null) {
+          					SpawnScreen.removeLookedAt(client);
           				}
           			}
 
@@ -235,6 +250,7 @@ jobs:
           import java.util.function.Consumer;
           import java.util.function.Supplier;
           import net.minecraft.ChatFormatting;
+          import net.minecraft.client.Minecraft;
           import net.minecraft.client.gui.GuiGraphicsExtractor;
           import net.minecraft.client.gui.components.Button;
           import net.minecraft.client.gui.components.EditBox;
@@ -254,6 +270,8 @@ jobs:
           import net.minecraft.world.entity.ai.attributes.Attributes;
           import net.minecraft.world.item.Item;
           import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.phys.AABB;
+          import net.minecraft.world.phys.Vec3;
 
           /**
            * Меню спавна: слева — модель выбранного моба, в середине — список яиц спавна с поиском,
@@ -272,6 +290,10 @@ jobs:
 
           	/** ID для превью-моба: в мир он не попадает, поэтому коллизий нет. */
           	private static final int PREVIEW_ENTITY_ID = 0x7FFFFF00;
+
+          	/** Метка, которой помечаются все мобы, созданные модом (для клавиши удаления). */
+          	private static final String TAG = "spawngui";
+          	private static final double REMOVE_RANGE = 64.0;
 
           	private static final int ROWS = 9;
           	private static final int[] COUNTS = {1, 2, 3, 5, 10, 25, 50, 100};
@@ -598,9 +620,12 @@ jobs:
 
           	/** Применяет настройки к мобу — и для превью, и для настоящего спавна. */
           	private static void applyParams(Entity entity, Params p, boolean forPreview) {
-          		if (!forPreview && !p.name().isEmpty()) {
-          			entity.setCustomName(Component.literal(p.name()));
-          			entity.setCustomNameVisible(true);
+          		if (!forPreview) {
+          			entity.addTag(TAG);
+          			if (!p.name().isEmpty()) {
+          				entity.setCustomName(Component.literal(p.name()));
+          				entity.setCustomNameVisible(true);
+          			}
           		}
           		entity.setSilent(p.silent());
           		entity.setInvulnerable(p.invulnerable());
@@ -674,6 +699,7 @@ jobs:
           	/** Собирает NBT для /summon из выбранных параметров (путь для чужих серверов). */
           	private static String buildNbt(Params p) {
           		List<String> tags = new ArrayList<>();
+          		tags.add("Tags:[\"" + TAG + "\"]");
           		if (p.noAi()) {
           			tags.add("NoAI:1b");
           		}
@@ -749,6 +775,57 @@ jobs:
           			SpawnGuiClient.queue("execute rotated ~ 0 run summon " + e.id() + " " + pos
           					+ (nbt.isEmpty() ? "" : " " + nbt));
           		}
+          	}
+
+          	/**
+           * Убирает заспавненного модом моба, на которого смотрит игрок. Работает даже если моб неуязвим.
+           * На чужом сервере (там нельзя точно навести) удаляется ближайший помеченный моб командой /kill.
+           */
+          	static void removeLookedAt(Minecraft mc) {
+          		if (mc.player == null) {
+          			return;
+          		}
+          		MinecraftServer server = mc.getSingleplayerServer();
+          		if (server == null) {
+          			SpawnGuiClient.queue("kill @n[tag=" + TAG + "]");
+          			return;
+          		}
+
+          		UUID playerId = mc.player.getUUID();
+          		server.execute(() -> {
+          			ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+          			if (player == null) {
+          				return;
+          			}
+          			ServerLevel level = (ServerLevel) player.level();
+          			Vec3 from = player.getEyePosition();
+          			Vec3 to = from.add(player.getViewVector(1.0f).scale(REMOVE_RANGE));
+          			AABB area = player.getBoundingBox().expandTowards(to.subtract(from)).inflate(1.0);
+
+          			Entity best = null;
+          			double bestDist = Double.MAX_VALUE;
+          			for (Entity entity : level.getEntities(player, area, x -> x.getTags().contains(TAG))) {
+          				AABB box = entity.getBoundingBox().inflate(0.1);
+          				double dist;
+          				if (box.contains(from)) {
+          					dist = 0.0;
+          				} else {
+          					var hit = box.clip(from, to);
+          					if (hit.isEmpty()) {
+          						continue;
+          					}
+          					dist = from.distanceToSqr(hit.get());
+          				}
+          				if (dist < bestDist) {
+          					bestDist = dist;
+          					best = entity;
+          				}
+          			}
+
+          			if (best != null) {
+          				best.discard();
+          			}
+          		});
           	}
 
           	/** Создаёт мобов прямо в мире встроенного сервера — без команд и без прав оператора. */
